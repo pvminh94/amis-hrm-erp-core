@@ -25,7 +25,34 @@ trong khoảng đó sẽ timeout.
 
 ## 2. Triển khai bằng Docker Compose (nhanh nhất)
 
+### 2.0 Một lệnh trên VPS Ubuntu
+
+Nếu chỉ muốn dựng nhanh trên VPS Ubuntu (đã có Docker hoặc cho script tự cài):
+
+```bash
+# Repo private => phải truyền token khi clone
+GITHUB_TOKEN=ghp_xxxxx bash scripts/deploy-vps.sh
+
+# Kèm dữ liệu mẫu:
+GITHUB_TOKEN=ghp_xxxxx WITH_SEED=true bash scripts/deploy-vps.sh
+```
+
+Script idempotent (chạy lại không phá dữ liệu), tự sinh JWT secret / khoá mã
+hoá / mật khẩu Postgres-Redis bằng `openssl`, chờ health check, rồi in ra các
+việc còn phải làm trước khi mở ra Internet. Đã lint bằng shellcheck 0.10.
+
+Chạy từ máy local qua SSH (cần `sshpass`):
+
+```bash
+sshpass -p '<pass>' ssh -o StrictHostKeyChecking=no bvqy4@<IP-VPS> \
+  'GITHUB_TOKEN=ghp_xxxxx bash -s' < scripts/deploy-vps.sh
+```
+
+> Nếu VPS chỉ có IP Tailscale (`100.x.x.x`), máy chạy lệnh phải nằm trong
+> tailnet đó.
+
 ### 2.1 Chuẩn bị
+
 
 ```bash
 git clone <repo> && cd amis-hrm-erp
