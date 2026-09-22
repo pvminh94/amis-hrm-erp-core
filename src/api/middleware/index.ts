@@ -75,7 +75,7 @@ export function asyncHandler(
 
 export function errorHandler(isProduction: boolean): ErrorRequestHandler {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  return (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  return (err: unknown, req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof ApiError) {
       res.status(err.status).json({
         error: { code: err.code, message: err.message, details: err.details },
@@ -95,6 +95,17 @@ export function errorHandler(isProduction: boolean): ErrorRequestHandler {
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
+
+    // LUÔN log phía server, kể cả production. Trước đây production chỉ ẩn
+    // message khỏi client mà không log gì cả — kết quả là một lỗi 500 trên
+    // VPS trở nên KHÔNG THỂ chẩn đoán: client thấy "Lỗi hệ thống", còn
+    // `docker compose logs app` thì trống trơn.
+    // Ẩn lỗi với client là đúng; ẩn lỗi với người vận hành là sai.
+    console.error(
+      `[AMIS HRM] 500 ${req.method} ${req.originalUrl}`,
+      err instanceof Error ? (err.stack ?? err.message) : err,
+    );
+
     // Không lộ chi tiết lỗi nội bộ ra client ở production
     res.status(500).json({
       error: {
