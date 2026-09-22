@@ -58,6 +58,9 @@ RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY --from=builder --chown=amishrm:amishrm /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder --chown=amishrm:amishrm /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder --chown=amishrm:amishrm /app/dist ./dist
+# scripts/ chứa smoke.mjs — chạy `npm run smoke` trong container để bắt lỗi
+# kiểu "unit test xanh nhưng bản build production hỏng" (CJS/ESM interop).
+COPY --chown=amishrm:amishrm scripts ./scripts
 
 # Chạy bằng user không root — container bị breakout cũng không có quyền root
 USER amishrm

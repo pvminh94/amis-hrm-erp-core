@@ -100,8 +100,8 @@ luôn khớp với code.
 ### 2.4 Nạp dữ liệu mẫu (chỉ cho môi trường test)
 
 ```bash
-docker compose exec app npx tsx prisma/seed.ts
-# hoặc từ máy host nếu đã cài Node:
+docker compose exec app node dist/prisma/seed.js
+# hoặc từ máy host nếu đã cài Node + tsx:
 npm run db:seed
 ```
 
@@ -358,9 +358,11 @@ Nói thẳng để không ai bị bất ngờ:
 
 | Hạng mục | Trạng thái | Lý do |
 |---|---|---|
-| **300 test tự động** | ✅ Đã chạy, pass toàn bộ | Domain logic, parser thiết bị, HTTP integration |
+| **316 unit test** | ✅ Đã chạy, pass toàn bộ | Domain logic, parser thiết bị, HTTP integration |
+| **`npm run smoke`** (16 kiểm tra) | ✅ Đã chạy, pass | Chạy `node` thuần trên `dist/` — không qua transformer |
 | `tsc --noEmit` | ✅ 0 lỗi | |
-| `npm run build` | ✅ Thành công | `dist/src/main.js` sinh ra đúng |
+| `npm run build` | ✅ Thành công | `dist/src/main.js`, `dist/prisma/seed.js` |
+| `shellcheck` trên `scripts/deploy-vps.sh` | ✅ 0 cảnh báo | shellcheck 0.10 |
 | Server khởi động + trả lời HTTP | ✅ Đã kiểm bằng curl thật | `/health` 200, helmet/CORS/401/404/429 đúng |
 | SQL migration | ✅ Đã sinh bằng `prisma migrate diff` (1.284 dòng, 37 bảng, 69 index, 37 FK) | **Chưa chạy trên PostgreSQL thật** |
 | `prisma migrate deploy` | ⚠️ **Chưa chạy** | Sandbox không có PostgreSQL |
@@ -369,12 +371,26 @@ Nói thẳng để không ai bị bất ngờ:
 | Kết nối thiết bị thật | ⚠️ **Chưa kiểm** | Cần máy Ronald Jack/Hikvision vật lý |
 | Gửi email phiếu lương | ⚠️ **Chưa kiểm** | Cần SMTP thật |
 
+### Vì sao cần cả `npm run smoke`
+
+Vitest/Vite tự chuyển đổi module và **tự trải `default` của module CJS ra
+namespace**; `node` thật thì không. Đã có một bug đúng loại này:
+`(await import('bcryptjs')).hash` là `undefined` khi chạy `node dist/...` →
+**đăng nhập hỏng hoàn toàn trên production trong khi 310 unit test vẫn xanh**.
+
+`npm run smoke` import thẳng từ `dist/` bằng `node` thuần nên bắt được. Chạy
+nó sau mỗi lần build:
+
+```bash
+npm run verify    # typecheck + build + smoke + test
+```
+
 **Việc đầu tiên phải làm trên môi trường thật**, theo đúng thứ tự:
 
 ```bash
 docker compose up -d postgres redis
 docker compose exec app npx prisma migrate deploy   # ← xác nhận migration chạy được
-docker compose exec app npx tsx prisma/seed.ts      # ← xác nhận schema + engine khớp nhau
+docker compose exec app node dist/prisma/seed.js     # ← xác nhận schema + engine khớp nhau
 docker compose up -d app worker
 curl -s -X POST http://localhost:3000/api/v1/auth/login \
   -H 'Content-Type: application/json' \

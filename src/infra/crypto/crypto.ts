@@ -84,14 +84,42 @@ export function sha256Hex(data: string | Buffer): string {
   return createHash('sha256').update(data).digest('hex');
 }
 
+/**
+ * Nạp bcryptjs.
+ *
+ * `bcryptjs` là module CJS chỉ export `default` — KHÔNG có named export.
+ * Nên `await import('bcryptjs')` trả về module NAMESPACE, trong đó `.hash`
+ * là `undefined` còn `.default.hash` mới là hàm thật.
+ *
+ * Vitest/Vite tự trải `default` ra namespace nên code cũ vẫn chạy xanh trong
+ * test, nhưng `node dist/...` thật thì nổ "bcrypt.hash is not a function" —
+ * tức là hỏng luôn đăng nhập trên production. Vì vậy phải lấy qua `.default`
+ * và fallback cho trường hợp bundler đã trải sẵn.
+ */
+async function loadBcrypt(): Promise<{
+  hash: (plain: string, rounds: number) => Promise<string>;
+  compare: (plain: string, hash: string) => Promise<boolean>;
+}> {
+  const ns = (await import('bcryptjs')) as unknown as {
+    default?: { hash: (p: string, r: number) => Promise<string>; compare: (p: string, h: string) => Promise<boolean> };
+    hash?: (p: string, r: number) => Promise<string>;
+    compare?: (p: string, h: string) => Promise<boolean>;
+  };
+  const lib = (ns.default ?? ns) as { hash?: unknown; compare?: unknown };
+  if (typeof lib.hash !== 'function' || typeof lib.compare !== 'function') {
+    throw new Error('Không nạp được bcryptjs — kiểm tra lại dependency');
+  }
+  return lib as { hash: (p: string, r: number) => Promise<string>; compare: (p: string, h: string) => Promise<boolean> };
+}
+
 /** Hash mật khẩu — bcrypt với salt rounds cấu hình (mặc định 10) */
 export async function hashPassword(plain: string, saltRounds = 10): Promise<string> {
-  const bcrypt = await import('bcryptjs');
+  const bcrypt = await loadBcrypt();
   return bcrypt.hash(plain, saltRounds);
 }
 
 export async function verifyPassword(plain: string, hash: string): Promise<boolean> {
-  const bcrypt = await import('bcryptjs');
+  const bcrypt = await loadBcrypt();
   return bcrypt.compare(plain, hash);
 }
 

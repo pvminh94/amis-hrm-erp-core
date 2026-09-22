@@ -165,14 +165,27 @@ fi
 log "Build image va khoi dong (lan dau mat 3-6 phut)..."
 $COMPOSE up -d --build
 
+# Lay ten container that (docker compose dat ten theo <project>-<service>-<n>)
+cid() { $COMPOSE ps -q "$1" 2>/dev/null | head -1; }
+health() {
+  local id; id="$(cid "$1")"
+  [ -z "$id" ] && { echo "missing"; return; }
+  docker inspect --format '{{.State.Health.Status}}' "$id" 2>/dev/null || echo "unknown"
+}
+
 log "Cho PostgreSQL va Redis san sang..."
 for i in $(seq 1 30); do
-  if $COMPOSE ps postgres 2>/dev/null | grep -q healthy \
-     && $COMPOSE ps redis 2>/dev/null | grep -q healthy; then
+  pg="$(health postgres)"; rd="$(health redis)"
+  if [ "$pg" = "healthy" ] && [ "$rd" = "healthy" ]; then
     ok "postgres + redis healthy"
     break
   fi
-  [ "$i" -eq 30 ] && die "postgres/redis khong healthy sau 300s. Xem: $COMPOSE logs postgres redis"
+  if [ "$i" -eq 30 ]; then
+    warn "postgres=$pg redis=$rd sau 300s"
+    $COMPOSE logs --tail=40 postgres redis
+    die "postgres/redis khong healthy. Xem log o tren."
+  fi
+  printf '  ... postgres=%s redis=%s (%s/30)\n' "$pg" "$rd" "$i"
   sleep 10
 done
 
@@ -183,16 +196,29 @@ for i in $(seq 1 30); do
     ok "API san sang: http://127.0.0.1:${APP_PORT}/health"
     break
   fi
-  [ "$i" -eq 30 ] && { $COMPOSE logs --tail=50 app; die "App khong khoi dong duoc. Xem log o tren."; }
+  if [ "$i" -eq 30 ]; then
+    $COMPOSE logs --tail=50 app
+    die "App khong khoi dong duoc. Xem log o tren."
+  fi
   sleep 5
 done
+
+# Smoke test tren ban build that — bat loi kieu "test xanh nhung production hong"
+log "Chay smoke test tren container..."
+if $COMPOSE exec -T app node scripts/smoke.mjs >/dev/null 2>&1; then
+  ok "smoke test trong container pass"
+else
+  warn "smoke test trong container khong chay duoc (co the thieu scripts/ trong image) — bo qua"
+fi
 
 # ==============================================================================
 # 6. SEED (tuỳ chọn)
 # ==============================================================================
 if [ "$WITH_SEED" = "true" ]; then
   log "Nap du lieu mau (36 nhan su, 30 ngay cham cong, bang luong that)..."
-  $COMPOSE exec -T app npx tsx prisma/seed.ts || die "Seed that bai"
+  # Chay ban DA BIEN DICH (dist/prisma/seed.js), khong phai `npx tsx`:
+  # tsx la devDependency nen khong co trong image production.
+  $COMPOSE exec -T app node dist/prisma/seed.js || die "Seed that bai"
   ok "Seed xong. Dang nhap: admin / Amis@123456"
   warn "DOI MAT KHAU NGAY SAU LAN DANG NHAP DAU TIEN."
 fi

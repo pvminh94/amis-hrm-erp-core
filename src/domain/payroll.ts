@@ -51,25 +51,68 @@ import { computeInsurance, type InsuranceResult } from './social-insurance.js';
 export interface AttendanceSummary {
   /** Số ngày công chuẩn thực tế (đã quy đổi, vd 24.5) */
   workedDays: number;
+  /**
+   * Các trường dưới đây ĐỀU tuỳ chọn. Thiếu trường nào thì hiểu là 0.
+   *
+   * Đây là ràng buộc sống còn: trước đây thiếu một trường sẽ làm
+   * `Math.max(0, undefined)` = NaN, lan ra prorateRatio = NaN và
+   * `roundVnd(baseSalary * NaN)` = 0 — tức là TÍNH LƯƠNG 0Đ CHO NHÂN VIÊN
+   * MÀ KHÔNG BÁO LỖI. Normalise ở đầu vào để chuyện đó không lặp lại.
+   */
   /** Số ngày công theo kế hoạch (để tính tỷ lệ lương) */
-  scheduledDays: number;
+  scheduledDays?: number;
   /** Ngày nghỉ CÓ hưởng lương (nghỉ phép năm, lễ tết) */
-  paidLeaveDays: number;
+  paidLeaveDays?: number;
   /** Ngày nghỉ KHÔNG hưởng lương */
-  unpaidLeaveDays: number;
+  unpaidLeaveDays?: number;
   /** Giờ làm đêm trong ca chính => phụ cấp 30% */
-  nightHours: number;
-  otWeekdayHours: number;
-  otWeekendHours: number;
-  otHolidayHours: number;
+  nightHours?: number;
+  otWeekdayHours?: number;
+  otWeekendHours?: number;
+  otHolidayHours?: number;
   /** Số lần đi trễ (sau grace period) và tổng phút trễ */
-  lateCount: number;
-  lateMinutes: number;
-  earlyLeaveCount: number;
+  lateCount?: number;
+  lateMinutes?: number;
+  earlyLeaveCount?: number;
   /** Số lần thiếu quẹt thẻ chưa giải trình */
-  missingPunchCount: number;
+  missingPunchCount?: number;
   /** Ngày vắng không phép */
-  absentDays: number;
+  absentDays?: number;
+}
+
+/** attendance với MỌI trường đã được điền số — kết quả của normaliseAttendance */
+export type NormalizedAttendance = Required<AttendanceSummary>;
+
+/**
+ * Ép mọi trường chấm công về số hữu hạn. Thiếu => 0. Không phải số => 0.
+ */
+export function normalizeAttendance(a: AttendanceSummary): NormalizedAttendance {
+  const n = (v: number | undefined, field: string): number => {
+    if (v === undefined || v === null) return 0;
+    const x = Number(v);
+    if (!Number.isFinite(x)) {
+      throw new Error(
+        `Trường chấm công "${field}" không phải số hữu hạn (nhận ${String(v)}) — ` +
+          'từ chối tính lương thay vì trả về 0đ trong im lặng',
+      );
+    }
+    return x;
+  };
+  return {
+    workedDays: n(a.workedDays, 'workedDays'),
+    scheduledDays: n(a.scheduledDays, 'scheduledDays'),
+    paidLeaveDays: n(a.paidLeaveDays, 'paidLeaveDays'),
+    unpaidLeaveDays: n(a.unpaidLeaveDays, 'unpaidLeaveDays'),
+    nightHours: n(a.nightHours, 'nightHours'),
+    otWeekdayHours: n(a.otWeekdayHours, 'otWeekdayHours'),
+    otWeekendHours: n(a.otWeekendHours, 'otWeekendHours'),
+    otHolidayHours: n(a.otHolidayHours, 'otHolidayHours'),
+    lateCount: n(a.lateCount, 'lateCount'),
+    lateMinutes: n(a.lateMinutes, 'lateMinutes'),
+    earlyLeaveCount: n(a.earlyLeaveCount, 'earlyLeaveCount'),
+    missingPunchCount: n(a.missingPunchCount, 'missingPunchCount'),
+    absentDays: n(a.absentDays, 'absentDays'),
+  };
 }
 
 export interface CustomComponent {
@@ -355,7 +398,9 @@ export function calculatePayroll(
   }
 
   // ---- 1. Tỷ lệ lương theo ngày công ---------------------------------------
-  const a = input.attendance;
+  // Chuẩn hoá TRƯỚC khi dùng: thiếu trường nào thì coi như 0, chứ không để
+  // NaN len vào phép tính.
+  const a = normalizeAttendance(input.attendance);
   const scheduledDays = Math.max(0, a.scheduledDays);
   const workedDays = Math.max(0, a.workedDays);
   const paidLeaveDays = Math.max(0, a.paidLeaveDays);
@@ -366,6 +411,14 @@ export function calculatePayroll(
   let prorateRatio = 1;
   if (scheduledDays > 0) {
     prorateRatio = clamp(paidDays / scheduledDays, 0, 1);
+  }
+  // Chốt chặn cuối: tỷ lệ lương phải là số hữu hạn trong [0,1]. Nếu lọt NaN
+  // xuống dưới này thì mọi khoản lương đều thành 0 mà không ai biết.
+  if (!Number.isFinite(prorateRatio) || prorateRatio < 0 || prorateRatio > 1) {
+    throw new Error(
+      `Tỷ lệ lương không hợp lệ (${prorateRatio}) cho nhân viên ${input.employeeCode} — ` +
+        `workedDays=${workedDays}, paidLeaveDays=${paidLeaveDays}, scheduledDays=${scheduledDays}`,
+    );
   }
   if (unpaidLeaveDays > 0) {
     warnings.push(`Có ${unpaidLeaveDays} ngày nghỉ không hưởng lương — đã trừ khỏi ngày công`);

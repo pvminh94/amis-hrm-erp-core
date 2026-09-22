@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { calculatePayroll, calculatePayrollBatch, DEFAULT_PAYROLL_CONFIG } from '../src/domain/payroll.js';
+import { calculatePayroll, calculatePayrollBatch, normalizeAttendance, DEFAULT_PAYROLL_CONFIG } from '../src/domain/payroll.js';
 import { REGIME_LEGACY_7B, REGIME_VN_2026_5B, resolveTaxRegime } from '../src/config/tax-regime.js';
 import { buildPolicySnapshot } from '../src/config/insurance.js';
 
@@ -406,5 +406,78 @@ describe('Payroll Engine — khấu trừ và các trường hợp biên', () =>
     expect(results).toHaveLength(2);
     expect(errors).toHaveLength(1);
     expect(errors[0]!.employeeCode).toBe('BAD');
+  });
+});
+
+// =============================================================================
+// HỒI QUY: thiếu trường chấm công KHÔNG được âm thầm trả về lương 0đ
+// =============================================================================
+// Bug từng có: `Math.max(0, a.paidLeaveDays)` với paidLeaveDays = undefined
+// cho ra NaN → prorateRatio = NaN → roundVnd(baseSalary * NaN) = 0.
+// Cả bảng lương thành 0đ mà không một dòng log nào báo.
+// =============================================================================
+
+describe('Payroll Engine — hồi quy: thiếu trường chấm công', () => {
+  const cfg = { periodEnd: '2025-06-30', taxRegime: 'LEGACY_7B' as const };
+  const emp = (attendance: Record<string, number>) =>
+    ({
+      employeeId: 'emp-1',
+      employeeCode: 'NV001',
+      fullName: 'Test',
+      costAccount: '6422',
+      contract: { baseSalary: 25_000_000, contractSalary: 30_000_000, maxKpiSalary: 0 },
+      insurance: { wageRegion: 'I' as const },
+      attendance,
+      dependents: 2,
+    }) as never;
+
+  it('chỉ truyền workedDays + scheduledDays vẫn tính đúng gross', () => {
+    const r = calculatePayroll(emp({ workedDays: 26, scheduledDays: 26 }), cfg);
+    expect(r.prorateRatio).toBe(1);
+    expect(r.gross).toBe(25_780_000);
+  });
+
+  it('KHÔNG trường nào của attendance là NaN', () => {
+    const r = calculatePayroll(emp({ workedDays: 26, scheduledDays: 26 }), cfg);
+    for (const [k, v] of Object.entries(r.audit.formulaContext)) {
+      if (typeof v === 'number') {
+        expect(Number.isFinite(v), `formulaContext.${k} = ${v}`).toBe(true);
+      }
+    }
+    expect(Number.isFinite(r.gross)).toBe(true);
+    expect(Number.isFinite(r.net)).toBe(true);
+  });
+
+  it('gross không bao giờ bằng 0 khi có ngày công', () => {
+    const r = calculatePayroll(emp({ workedDays: 20, scheduledDays: 26 }), cfg);
+    expect(r.gross).toBeGreaterThan(0);
+    expect(r.prorateRatio).toBeCloseTo(20 / 26, 5);
+  });
+
+  it('truyền chuỗi số vẫn chạy (dữ liệu từ Excel/CSV hay bị thế)', () => {
+    const r = calculatePayroll(
+      emp({ workedDays: 26 as never, scheduledDays: '26' as never, nightHours: '4' as never }),
+      cfg,
+    );
+    // hourlyRate = round(25.000.000/26/8) = 120.192
+    // phụ cấp đêm 4h = round(120.192 × 0.3 × 4) = 144.230
+    const night = r.earnings.find((e) => e.code === 'NIGHT_ALLOWANCE');
+    expect(night?.amount).toBe(144_230);
+    expect(r.gross).toBe(25_780_000 + 144_230);
+  });
+
+  it('truyền giá trị KHÔNG phải số => NÉM LỖI, không trả về 0đ', () => {
+    expect(() =>
+      calculatePayroll(emp({ workedDays: 26, scheduledDays: 26, nightHours: NaN }), cfg),
+    ).toThrow(/không phải số hữu hạn/);
+  });
+
+  it('normalizeAttendance điền 0 cho mọi trường thiếu', () => {
+    const n = normalizeAttendance({ workedDays: 26 });
+    expect(n).toEqual({
+      workedDays: 26, scheduledDays: 0, paidLeaveDays: 0, unpaidLeaveDays: 0,
+      nightHours: 0, otWeekdayHours: 0, otWeekendHours: 0, otHolidayHours: 0,
+      lateCount: 0, lateMinutes: 0, earlyLeaveCount: 0, missingPunchCount: 0, absentDays: 0,
+    });
   });
 });
