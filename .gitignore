@@ -1,0 +1,57 @@
+# ============================================================================
+# .gitignore — AMIS HRM & ERP Core
+# ============================================================================
+# Quy tắc số 1: KHÔNG BAO GIỜ commit bí mật. File .env chứa JWT secret,
+# khoá mã hoá sinh trắc học và (trong môi trường dev) token GitHub.
+# ============================================================================
+
+# --- BÍ MẬT — tuyệt đối không commit -----------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.github-token
+
+# --- Dependencies & build -----------------------------------------------------
+node_modules/
+dist/
+build/
+out/
+coverage/
+*.tsbuildinfo
+
+# --- Prisma -------------------------------------------------------------------
+# KHÔNG ignore prisma/migrations — migration là code, phải được version hoá.
+# Chỉ ignore client được sinh ra.
+node_modules/.prisma/
+
+# --- Runtime data --------------------------------------------------------------
+storage/
+payment-files/
+uploads/
+*.log
+logs/
+pids/
+*.pid
+*.seed
+
+# --- Test & tooling cache -------------------------------------------------------
+.vitest/
+.nyc_output/
+.eslintcache
+
+# --- Editor & OS -----------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Docker local overrides -------------------------------------------------------
+docker-compose.override.yml
+*.local.yml

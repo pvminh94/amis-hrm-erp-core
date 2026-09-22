@@ -1,0 +1,38 @@
+# ============================================================================
+# .dockerignore — giữ image nhỏ và KHÔNG đưa bí mật vào layer
+# ============================================================================
+
+# Bí mật — TUYỆT ĐỐI không được vào image
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Build artifacts (image tự build lại từ source)
+node_modules
+dist
+coverage
+.next
+.nuxt
+.output
+
+# VCS & tooling
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.log
+
+# Test & docs không cần trong runtime image
+tests
+docs
+*.spec.ts
+*.test.ts
+vitest.config.ts
+.eslintrc*
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,157 @@
+# ==============================================================================
+# AMIS HRM & ERP CORE — docker-compose
+# ==============================================================================
+#   docker compose up -d          → chạy app + worker + postgres + redis
+#   docker compose exec app npm run db:seed   → nạp dữ liệu mẫu
+#
+# KHÔNG dùng cho production nguyên trạng: phải đổi toàn bộ mật khẩu, bật TLS,
+# và chuyển sang managed PostgreSQL (RDS/Cloud SQL) nếu có thể.
+# Chi tiết ở docs/deployment.md
+# ==============================================================================
+
+name: amis-hrm-erp
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — nguồn sự thật duy nhất, không có mock
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: amis-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-amis_hrm}
+      POSTGRES_USER: ${POSTGRES_USER:-amis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Bắt buộc đặt POSTGRES_PASSWORD trong .env}
+      # Ép UTF-8 — dữ liệu tiếng Việt
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-amis} -d ${POSTGRES_DB:-amis_hrm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [amis-net]
+    # Giới hạn tài nguyên để không ăn hết RAM máy chủ
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  # ---------------------------------------------------------------------------
+  # Redis — hàng đợi BullMQ + rate limit store
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: amis-redis
+    restart: unless-stopped
+    # maxmemory-policy noeviction: TUYỆT ĐỐI không được xoá job khi đầy bộ nhớ —
+    # mất job tính lương là sự cố nghiêm trọng. Để Redis báo lỗi thay vì âm thầm xoá.
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
+      --requirepass ${REDIS_PASSWORD:?Bắt buộc đặt REDIS_PASSWORD trong .env}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [amis-net]
+    deploy:
+      resources:
+        limits:
+          memory: 640m
+
+  # ---------------------------------------------------------------------------
+  # API server
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: amis-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-amis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-amis_hrm}?schema=public&connection_limit=20
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - storage:/var/amis
+    networks: [amis-net]
+    # Chạy migration TRƯỚC khi start server — tránh chạy code mới trên schema cũ
+    command: >
+      sh -c "npx prisma migrate deploy &&
+             node dist/src/main.js"
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # ---------------------------------------------------------------------------
+  # Worker — chạy tách khỏi API để job nặng không nghẽn request
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: amis-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_started
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-amis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-amis_hrm}?schema=public&connection_limit=10
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    volumes:
+      - storage:/var/amis
+    networks: [amis-net]
+    command: ["node", "dist/src/application/workers/worker.js"]
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -q '[w]orker.js'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+  redisdata:
+  storage:
+
+networks:
+  amis-net:
+    driver: bridge

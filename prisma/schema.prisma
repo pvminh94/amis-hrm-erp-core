@@ -1,0 +1,1269 @@
+// ============================================================================
+// AMIS HRM & ERP CORE — Prisma Schema (PostgreSQL)
+//
+// Quy ước:
+//  - Mọi bảng nghiệp vụ có `deletedAt` => SOFT DELETE. Query mặc định được lọc
+//    bởi Prisma Client Extension trong src/infra/repositories/prisma.ts.
+//  - Tiền tệ lưu dạng Int (VND) — TUYỆT ĐỐI không dùng Float cho tiền.
+//  - Tỷ lệ (%) lưu dạng Decimal(6,4) (0.1050 = 10.5%).
+//  - Toạ độ lưu Decimal(10,7) — đủ chính xác ~1cm.
+//  - Nhúng 512D khuôn mặt lưu dạng Bytes (đã AES-256-GCM) — không lưu plaintext.
+//  - Audit: createdAt / updatedAt / createdBy / updatedBy trên mọi bảng chính.
+// ============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_DATABASE_URL")
+  extensions = [pgcrypto, uuidOssp(map: "uuid-ossp")]
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum UserRole {
+  SUPER_ADMIN
+  HR_ADMIN
+  HR_STAFF
+  DEPARTMENT_HEAD
+  DIRECT_LINE_MANAGER
+  ACCOUNTANT
+  CHIEF_ACCOUNTANT
+  CEO
+  EMPLOYEE
+}
+
+enum DataScope {
+  ALL_COMPANY // Toàn công ty
+  BRANCH // Chi nhánh
+  DEPARTMENT // Phòng ban
+  SELF // Cá nhân
+}
+
+enum UserStatus {
+  ACTIVE
+  LOCKED
+  PENDING
+  DELETED
+}
+
+enum OrgUnitType {
+  COMPANY
+  BRANCH
+  DEPARTMENT
+  TEAM
+}
+
+/// Phòng ban thuộc nhóm chi phí nào => quyết định TK Nợ khi hạch toán lương
+enum CostCenterType {
+  SELLING // TK 6421 - Chi phí bán hàng
+  ADMIN // TK 6422 - Chi phí QLDN
+  PRODUCTION // TK 154 - Chi phí SXKD dở dang
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum EmploymentStatus {
+  PROBATION
+  ACTIVE
+  SUSPENDED
+  NOTICE
+  TERMINATED
+}
+
+enum ContractType {
+  /// Không xác định thời hạn
+  INDEFINITE
+  /// Xác định thời hạn (12-36 tháng)
+  FIXED_TERM
+  /// Dưới 12 tháng
+  SEASONAL
+  /// Thử việc
+  PROBATION
+  /// Cộng tác viên
+  COLLABORATOR
+}
+
+enum WorkdayType {
+  WORKING_DAY
+  WEEKLY_REST_DAY
+  PUBLIC_HOLIDAY
+  PAID_LEAVE_DAY
+  UNPAID_LEAVE_DAY
+  COMPANY_HOLIDAY
+}
+
+enum ShiftType {
+  /// Ca hành chính: 08:00-17:00
+  OFFICE
+  /// Ca đêm vắt qua 0h: 22:00 -> 06:00(+1)
+  NIGHT_CROSS_DAY
+  /// Ca gãy / split shift: 2 đoạn trong 1 ngày
+  SPLIT
+  /// Ca xoay trong hệ 3 ca 4 kíp
+  ROTATING
+  /// Ca linh hoạt
+  FLEXIBLE
+}
+
+enum PunchSource {
+  DEVICE_HIKVISION
+  DEVICE_RONALD_JACK
+  DEVICE_ZKTECO
+  MOBILE_GPS
+  MOBILE_FACE
+  WEB_MANUAL
+  IMPORT_CSV
+  ADMS_PUSH
+  ISAPI_LISTEN
+}
+
+enum PunchDirection {
+  IN
+  OUT
+}
+
+enum AttendanceStatus {
+  PRESENT
+  LATE
+  ABSENT
+  LEAVE_PAID
+  LEAVE_UNPAID
+  BUSINESS_TRIP
+  MISSING_PUNCH
+  HALF_DAY
+  HOLIDAY_OFF
+  WEEKLY_OFF
+}
+
+enum RequestType {
+  ANNUAL_LEAVE
+  SICK_LEAVE
+  UNPAID_LEAVE
+  MATERNITY_LEAVE
+  BEREAVEMENT_LEAVE
+  MARRIAGE_LEAVE
+  BUSINESS_TRIP
+  REGULARIZATION // Đơn giải trình (quên quẹt thẻ / sai dữ liệu chấm công)
+  OVERTIME
+  SHIFT_SWAP
+  OTHER
+}
+
+enum RequestStatus {
+  DRAFT
+  SUBMITTED
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+  RETURNED
+}
+
+enum ApprovalAction {
+  SUBMIT
+  APPROVE
+  REJECT
+  RETURN
+  CANCEL
+  REASSIGN
+  AUTO_APPROVE
+  ESCALATE
+}
+
+enum PayRunStatus {
+  DRAFT
+  LOCKED
+  APPROVED
+  PAID
+  CANCELLED
+}
+
+enum ComponentType {
+  EARNING
+  DEDUCTION
+}
+
+enum ComponentCalcMode {
+  FIXED // Số tiền cố định
+  PER_DAY // x số ngày công
+  PER_HOUR // x số giờ công
+  PERCENT_BASE // % lương cơ bản
+  PERCENT_CONTRACT // % lương hợp đồng (lương đóng BH)
+  FORMULA // Biểu thức động (Dynamic Formula Builder)
+  FROM_ATTENDANCE // Lấy từ bảng chấm công (phụ cấp đêm, OT...)
+  FROM_COMMISSION // Lấy từ cầu nối Sales -> Lương
+}
+
+enum JournalStatus {
+  DRAFT
+  POSTED
+  REVERSED
+}
+
+enum OrderStatus {
+  DRAFT
+  CONFIRMED
+  DELIVERED
+  PAID
+  CANCELLED
+}
+
+enum BankCode {
+  VCB // Vietcombank
+  TCB // Techcombank
+  CTG // Vietinbank
+  MBB // MB Bank
+  GENERIC
+}
+
+enum QueueName {
+  SYNC_RAW_PUNCH // Đồng bộ nhật ký quẹt thẻ thô
+  CLOSE_NIGHT_SHIFT // Chốt công đêm vắt 0h
+  SEND_PAYSLIP_MAIL // Gửi phiếu lương
+  CALC_PROGRESSIVE_TAX // Tính thuế luỹ tiến hàng loạt
+  POST_GL_JOURNAL // Sinh bút toán kế toán
+  EXPORT_PAYMENT_FILE // Xuất file UNC
+  LIVENESS_RESCAN // Quét lại liveness
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// ============================================================================
+// IDENTITY & ACCESS
+// ============================================================================
+
+model User {
+  id            String         @id @default(uuid()) @db.Uuid
+  username      String         @unique @db.VarChar(64)
+  email         String         @unique @db.VarChar(160)
+  passwordHash  String         @map("password_hash") @db.VarChar(100) // bcrypt, salt rounds = 10
+  role          UserRole       @default(EMPLOYEE)
+  dataScope     DataScope      @default(SELF) @map("data_scope")
+  /// Chuỗi phạm vi dữ liệu: ["branch:<uuid>", "dept:<uuid>"] — dùng khi scope = BRANCH/DEPARTMENT
+  scopeRefs     String[]       @default([]) @map("scope_refs")
+  status        UserStatus     @default(ACTIVE)
+  lastLoginAt   DateTime?      @map("last_login_at")
+  lastLoginIp   String?        @map("last_login_ip") @db.VarChar(64)
+  failedLogins  Int            @default(0) @map("failed_logins")
+  lockedUntil   DateTime?      @map("locked_until")
+  mfaEnabled    Boolean        @default(false) @map("mfa_enabled")
+  mfaSecret     String?        @map("mfa_secret") @db.VarChar(64)
+  employee      Employee?
+  refreshTokens RefreshToken[]
+  approvals     ApprovalStep[]
+  auditLogs     AuditLog[]
+  createdBy     String?        @map("created_by")
+  updatedBy     String?        @map("updated_by")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  deletedAt     DateTime?      @map("deleted_at")
+
+  @@index([role])
+  @@index([dataScope])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+/// Refresh token HttpOnly. Chỉ lưu hash (SHA-256) của token, hỗ trợ reuse-detection.
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(128)
+  familyId   String    @map("family_id") @db.Uuid // chuỗi token xoay vòng
+  replacedBy String?   @map("replaced_by") @db.Uuid
+  userAgent  String?   @map("user_agent") @db.VarChar(255)
+  ipAddress  String?   @map("ip_address") @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model Permission {
+  id          String           @id @default(uuid()) @db.Uuid
+  code        String           @unique @db.VarChar(128) // vd: payroll.run.approve
+  name        String           @db.VarChar(160)
+  module      String           @db.VarChar(64)
+  description String?          @db.Text
+  roles       RolePermission[]
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+  deletedAt   DateTime?        @map("deleted_at")
+
+  @@index([module])
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String     @id @default(uuid()) @db.Uuid
+  role         UserRole
+  permissionId String     @map("permission_id") @db.Uuid
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now()) @map("created_at")
+
+  @@unique([role, permissionId])
+  @@map("role_permissions")
+}
+
+// ============================================================================
+// TỔ CHỨC
+// ============================================================================
+
+model OrgUnit {
+  id               String         @id @default(uuid()) @db.Uuid
+  code             String         @unique @db.VarChar(32)
+  name             String         @db.VarChar(160)
+  type             OrgUnitType
+  parentId         String?        @map("parent_id") @db.Uuid
+  parent           OrgUnit?       @relation("OrgTree", fields: [parentId], references: [id])
+  children         OrgUnit[]      @relation("OrgTree")
+  costCenterType   CostCenterType @default(ADMIN) @map("cost_center_type")
+  /// TK Nợ mặc định khi hạch toán chi phí nhân công (6421 / 6422 / 154)
+  glExpenseAccount String         @default("6422") @map("gl_expense_account") @db.VarChar(16)
+  /// Vị trí địa lý phục vụ geofencing
+  latitude         Decimal?       @db.Decimal(10, 7)
+  longitude        Decimal?       @db.Decimal(10, 7)
+  /// Bán kính cho phép chấm công (mét). Null => thừa kế từ cha.
+  geofenceRadiusM  Int?           @map("geofence_radius_m")
+  /// Polygon (GeoJSON ring) — ưu tiên hơn bán kính tròn
+  geofencePolygon  Json?          @map("geofence_polygon")
+  /// Danh sách BSSID WiFi văn phòng để đối soát (chữ thường, dạng aa:bb:cc:dd:ee:ff)
+  wifiBssids       String[]       @default([]) @map("wifi_bssids")
+  managerId        String?        @map("manager_id") @db.Uuid
+  employees        Employee[]
+  positions        Position[]
+  devices          Device[]
+  costCenter       CostCenter?
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+  createdBy        String?        @map("created_by")
+  deletedAt        DateTime?      @map("deleted_at")
+
+  @@index([parentId])
+  @@index([type])
+  @@index([deletedAt])
+  @@map("org_units")
+}
+
+model Position {
+  id           String     @id @default(uuid()) @db.Uuid
+  code         String     @unique @db.VarChar(32)
+  name         String     @db.VarChar(160)
+  level        Int        @default(1) // bậc chức danh, dùng cho ma trận duyệt
+  departmentId String?    @map("department_id") @db.Uuid
+  department   OrgUnit?   @relation(fields: [departmentId], references: [id])
+  employees    Employee[]
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+  deletedAt    DateTime?  @map("deleted_at")
+
+  @@index([deletedAt])
+  @@map("positions")
+}
+
+// ============================================================================
+// NHÂN SỰ
+// ============================================================================
+
+model Employee {
+  id             String    @id @default(uuid()) @db.Uuid
+  code           String    @unique @db.VarChar(32) // Mã nhân viên AMIS
+  fullName       String    @map("full_name") @db.VarChar(160)
+  gender         Gender    @default(MALE)
+  dateOfBirth    DateTime? @map("date_of_birth") @db.Date
+  /// Mã hoá AES-256-GCM (ciphertext base64) — PII
+  nationalIdEnc  String    @map("national_id_enc") @db.VarChar(255)
+  nationalIdHint String    @map("national_id_hint") @db.VarChar(8) // 4 số cuối, dùng tìm kiếm
+  taxCode        String?   @map("tax_code") @db.VarChar(32)
+  /// Mã hoá
+  bankAccountEnc String?   @map("bank_account_enc") @db.VarChar(255)
+  bankCode       BankCode  @default(GENERIC) @map("bank_code")
+  bankBranch     String?   @map("bank_branch") @db.VarChar(160)
+  phone          String?   @db.VarChar(24)
+  email          String?   @db.VarChar(160)
+  address        String?   @db.VarChar(255)
+
+  departmentId String?    @map("department_id") @db.Uuid
+  department   OrgUnit?   @relation(fields: [departmentId], references: [id])
+  positionId   String?    @map("position_id") @db.Uuid
+  position     Position?  @relation(fields: [positionId], references: [id])
+  /// Quản lý trực tiếp — nút gốc của luồng duyệt tuần tự
+  managerId    String?    @map("manager_id") @db.Uuid
+  manager      Employee?  @relation("ManagerChain", fields: [managerId], references: [id])
+  subordinates Employee[] @relation("ManagerChain")
+
+  hireDate   DateTime         @map("hire_date") @db.Date
+  leaveDate  DateTime?        @map("leave_date") @db.Date
+  status     EmploymentStatus @default(ACTIVE)
+  /// Vùng lương tối thiểu nơi NLĐ làm việc => trần BHTN
+  wageRegion String           @default("I") @map("wage_region") @db.VarChar(2)
+  userId     String?          @unique @map("user_id") @db.Uuid
+  user       User?            @relation(fields: [userId], references: [id])
+
+  contracts     Contract[]
+  insurance     EmployeeInsurance?
+  dependents    Dependent[]
+  schedules     EmployeeSchedule[]
+  attendances   DailyAttendance[]
+  leaveRequests LeaveRequest[]
+  paySlips      PaySlip[]
+  biometric     BiometricEnrollment?
+  punches       RawPunch[]
+  createdAt     DateTime             @default(now()) @map("created_at")
+  updatedAt     DateTime             @updatedAt @map("updated_at")
+  createdBy     String?              @map("created_by")
+  deletedAt     DateTime?            @map("deleted_at")
+
+  @@index([departmentId])
+  @@index([managerId])
+  @@index([status])
+  @@index([nationalIdHint])
+  @@index([deletedAt])
+  @@map("employees")
+}
+
+/// Bảo mật sinh trắc: chỉ lưu vector embedding 512D đã mã hoá + template hash.
+model BiometricEnrollment {
+  id             String    @id @default(uuid()) @db.Uuid
+  employeeId     String    @unique @map("employee_id") @db.Uuid
+  employee       Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  /// AES-256-GCM ciphertext của Float32Array(512) => ~2048 bytes plaintext
+  faceVectorEnc  Bytes     @map("face_vector_enc")
+  /// SHA-256 của vector gốc — tra cứu 1:N mà không cần giải mã toàn bộ
+  faceVectorHash String    @map("face_vector_hash") @db.VarChar(64)
+  dimensions     Int       @default(512)
+  algorithm      String    @default("arcface-r100") @db.VarChar(64)
+  /// Điểm liveness lúc đăng ký (0..1)
+  livenessScore  Decimal   @default(0) @map("liveness_score") @db.Decimal(5, 4)
+  qualityScore   Decimal   @default(0) @map("quality_score") @db.Decimal(5, 4)
+  enrolledAt     DateTime  @default(now()) @map("enrolled_at")
+  revokedAt      DateTime? @map("revoked_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@index([faceVectorHash])
+  @@map("biometric_enrollments")
+}
+
+model Contract {
+  id             String       @id @default(uuid()) @db.Uuid
+  contractNo     String       @unique @map("contract_no") @db.VarChar(32)
+  employeeId     String       @map("employee_id") @db.Uuid
+  employee       Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  type           ContractType
+  startDate      DateTime     @map("start_date") @db.Date
+  endDate        DateTime?    @map("end_date") @db.Date
+  /// Lương cơ bản (lương theo công việc/chức danh)
+  baseSalary     Int          @map("base_salary")
+  /// Lương ghi trên hợp đồng — căn cứ đóng BHXH/BHYT/BHTN
+  contractSalary Int          @map("contract_salary")
+  /// Lương KPI / hiệu quả tối đa
+  maxKpiSalary   Int          @default(0) @map("max_kpi_salary")
+  currency       String       @default("VND") @db.VarChar(8)
+  probationRate  Decimal      @default(0.85) @map("probation_rate") @db.Decimal(5, 4)
+  status         String       @default("ACTIVE") @db.VarChar(16)
+  attachmentUrl  String?      @map("attachment_url") @db.VarChar(512)
+  signedAt       DateTime?    @map("signed_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+  deletedAt      DateTime?    @map("deleted_at")
+
+  @@index([employeeId, startDate])
+  @@index([deletedAt])
+  @@map("contracts")
+}
+
+/// Cấu hình bảo hiểm theo từng NLĐ (cho phép loại trừ: nghỉ thai sản, nghỉ không lương >14 ngày...)
+model EmployeeInsurance {
+  id              String    @id @default(uuid()) @db.Uuid
+  employeeId      String    @unique @map("employee_id") @db.Uuid
+  employee        Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  siNumber        String?   @map("si_number") @db.VarChar(32) // Số sổ BHXH
+  hiNumber        String?   @map("hi_number") @db.VarChar(32) // Mã thẻ BHYT
+  enrolledFrom    DateTime  @map("enrolled_from") @db.Date
+  enrolledTo      DateTime? @map("enrolled_to") @db.Date
+  isSiMandatory   Boolean   @default(true) @map("is_si_mandatory")
+  isHiMandatory   Boolean   @default(true) @map("is_hi_mandatory")
+  isUiMandatory   Boolean   @default(true) @map("is_ui_mandatory")
+  /// Căn cứ đóng BH do HR khai (null => dùng contractSalary)
+  siBaseOverride  Int?      @map("si_base_override")
+  /// Loại trừ 14 ngày không lương trong tháng => không đóng BHTN
+  suspendUnpaid14 Boolean   @default(true) @map("suspend_unpaid_14")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  @@map("employee_insurances")
+}
+
+model Dependent {
+  id            String    @id @default(uuid()) @db.Uuid
+  employeeId    String    @map("employee_id") @db.Uuid
+  employee      Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  fullName      String    @map("full_name") @db.VarChar(160)
+  /// Mã hoá — PII
+  nationalIdEnc String?   @map("national_id_enc") @db.VarChar(255)
+  relationship  String    @db.VarChar(48) // CON / VO_CHONG / CHA_ME / KHAC
+  dateOfBirth   DateTime? @map("date_of_birth") @db.Date
+  /// Người nộp thuế chỉ được giảm trừ 1 lần cho mỗi NPT
+  taxCode       String?   @map("tax_code") @db.VarChar(32)
+  validFrom     DateTime  @map("valid_from") @db.Date
+  validTo       DateTime? @map("valid_to") @db.Date
+  /// Đã được tính giảm trừ cho kỳ nào (chống trùng lặp giữa các NNT)
+  isVerified    Boolean   @default(false) @map("is_verified")
+  proofUrl      String?   @map("proof_url") @db.VarChar(512)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  deletedAt     DateTime? @map("deleted_at")
+
+  @@unique([taxCode, validFrom])
+  @@index([employeeId, validFrom, validTo])
+  @@index([deletedAt])
+  @@map("dependents")
+}
+
+// ============================================================================
+// CA KÍP & LỊCH LÀM VIỆC
+// ============================================================================
+
+model WorkCalendar {
+  id          String            @id @default(uuid()) @db.Uuid
+  code        String            @unique @db.VarChar(32)
+  name        String            @db.VarChar(160)
+  /// 0=CN .. 6=T7
+  workingDays Int[]             @map("working_days")
+  days        CalendarDay[]
+  shifts      ShiftDefinition[]
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+  deletedAt   DateTime?         @map("deleted_at")
+
+  @@index([deletedAt])
+  @@map("work_calendars")
+}
+
+model CalendarDay {
+  id         String       @id @default(uuid()) @db.Uuid
+  calendarId String       @map("calendar_id") @db.Uuid
+  calendar   WorkCalendar @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+  date       DateTime     @db.Date
+  type       WorkdayType
+  /// Tên ngày lễ (vd: "Tết Dương lịch")
+  label      String?      @db.VarChar(160)
+  /// Ngày lễ có hưởng lương => OT 300%
+  isPaid     Boolean      @default(true) @map("is_paid")
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime     @updatedAt @map("updated_at")
+
+  @@unique([calendarId, date])
+  @@index([date])
+  @@map("calendar_days")
+}
+
+model ShiftDefinition {
+  id                     String             @id @default(uuid()) @db.Uuid
+  code                   String             @unique @db.VarChar(32)
+  name                   String             @db.VarChar(160)
+  type                   ShiftType
+  /// Tổng số giờ công chuẩn của ca (để tính lương giờ)
+  standardHours          Decimal            @map("standard_hours") @db.Decimal(5, 2)
+  /// Số đoạn của ca (1 = ca liền, 2 = ca gãy)
+  segmentCount           Int                @default(1) @map("segment_count")
+  /// JSON: [{ name, start "08:00", endOffsetMin 540, isNight }]
+  segments               Json
+  /// Ca vắt qua 0h — end thuộc ngày +1
+  crossMidnight          Boolean            @default(false) @map("cross_midnight")
+  /// Khung giờ đêm pháp lý (mặc định 22:00-06:00) dùng tính phụ cấp 30%
+  nightStartMin          Int                @default(1320) @map("night_start_min")
+  nightEndMin            Int                @default(360) @map("night_end_min")
+  /// Làm đêm được cộng thêm 30% (Điều 98 khoản 2 BLLĐ 2019)
+  nightPremiumRate       Decimal            @default(0.3) @map("night_premium_rate") @db.Decimal(5, 4)
+  graceMinutes           Int                @default(10) @map("grace_minutes")
+  lateToleranceMin       Int                @default(0) @map("late_tolerance_min")
+  absentAfterLateMin     Int                @default(240) @map("absent_after_late_min")
+  earlyLeaveToleranceMin Int                @default(0) @map("early_leave_tolerance_min")
+  /// Cho phép ghép cặp First-In/Last-Out tự do (không bám ca kế hoạch)
+  allowFreePairing       Boolean            @default(false) @map("allow_free_pairing")
+  colorHex               String             @default("#3b82f6") @map("color_hex") @db.VarChar(9)
+  calendarId             String?            @map("calendar_id") @db.Uuid
+  calendar               WorkCalendar?      @relation(fields: [calendarId], references: [id])
+  schedules              EmployeeSchedule[]
+  attendances            DailyAttendance[]
+  createdAt              DateTime           @default(now()) @map("created_at")
+  updatedAt              DateTime           @updatedAt @map("updated_at")
+  deletedAt              DateTime?          @map("deleted_at")
+
+  @@index([type])
+  @@index([deletedAt])
+  @@map("shift_definitions")
+}
+
+/// Mẫu xoay ca: hệ 3 ca 4 kíp — pattern lặp theo chu kỳ
+model RotationPattern {
+  id          String    @id @default(uuid()) @db.Uuid
+  code        String    @unique @db.VarChar(32)
+  name        String    @db.VarChar(160)
+  /// JSON: [{ dayOffset:0, shiftCode:"CA1" }, ...] lặp lại sau cycleLength ngày
+  pattern     Json
+  cycleLength Int       @map("cycle_length")
+  /// Ngày neo chu kỳ
+  anchorDate  DateTime  @map("anchor_date") @db.Date
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  @@index([deletedAt])
+  @@map("rotation_patterns")
+}
+
+model EmployeeSchedule {
+  id                String           @id @default(uuid()) @db.Uuid
+  employeeId        String           @map("employee_id") @db.Uuid
+  employee          Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  /// Ngày CÔNG VỤ (work date). Ca đêm 22:00 ngày D thuộc workDate = D.
+  workDate          DateTime         @map("work_date") @db.Date
+  shiftId           String?          @map("shift_id") @db.Uuid
+  shift             ShiftDefinition? @relation(fields: [shiftId], references: [id])
+  calendarDayId     String?          @map("calendar_day_id") @db.Uuid
+  rotationPatternId String?          @map("rotation_pattern_id") @db.Uuid
+  isLocked          Boolean          @default(false) @map("is_locked")
+  note              String?          @db.VarChar(255)
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+  deletedAt         DateTime?        @map("deleted_at")
+
+  @@unique([employeeId, workDate])
+  @@index([workDate])
+  @@index([shiftId])
+  @@index([deletedAt])
+  @@map("employee_schedules")
+}
+
+// ============================================================================
+// CHẤM CÔNG
+// ============================================================================
+
+model Device {
+  id            String     @id @default(uuid()) @db.Uuid
+  code          String     @unique @db.VarChar(32)
+  name          String     @db.VarChar(160)
+  /// hikvision | ronald_jack | zkteco | generic
+  protocol      String     @db.VarChar(32)
+  serialNumber  String     @unique @map("serial_number") @db.VarChar(64)
+  ipAddress     String?    @map("ip_address") @db.VarChar(64)
+  port          Int?
+  /// Token dùng cho ADMS Push / ISAPI Listening authentication
+  pushToken     String?    @map("push_token") @db.VarChar(128)
+  orgUnitId     String?    @map("org_unit_id") @db.Uuid
+  orgUnit       OrgUnit?   @relation(fields: [orgUnitId], references: [id])
+  latitude      Decimal?   @db.Decimal(10, 7)
+  longitude     Decimal?   @db.Decimal(10, 7)
+  isActive      Boolean    @default(true) @map("is_active")
+  lastHeartbeat DateTime?  @map("last_heartbeat")
+  punches       RawPunch[]
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+  deletedAt     DateTime?  @map("deleted_at")
+
+  @@index([orgUnitId])
+  @@index([deletedAt])
+  @@map("devices")
+}
+
+/// Nhật ký quẹt thẻ THÔ — immutable, append-only. Là nguồn dữ liệu gốc duy nhất.
+model RawPunch {
+  id                String           @id @default(uuid()) @db.Uuid
+  employeeId        String?          @map("employee_id") @db.Uuid
+  employee          Employee?        @relation(fields: [employeeId], references: [id])
+  /// Mã máy chấm công (device user number) — dùng khi chưa map được employeeId
+  deviceUserId      String?          @map("device_user_id") @db.VarChar(32)
+  deviceId          String?          @map("device_id") @db.Uuid
+  device            Device?          @relation(fields: [deviceId], references: [id])
+  /// Thời điểm quẹt (đã chuẩn hoá về UTC, lưu kèm timezone gốc)
+  punchAt           DateTime         @map("punch_at")
+  originalTz        String           @default("Asia/Ho_Chi_Minh") @map("original_tz") @db.VarChar(48)
+  direction         PunchDirection?
+  source            PunchSource
+  /// Payload thô từ thiết bị — giữ nguyên để đối soát/tái xử lý
+  rawPayload        Json?            @map("raw_payload")
+  /// Chống trùng: hash(device_sn + device_user_id + punch_at_truncated)
+  dedupeHash        String           @unique @map("dedupe_hash") @db.VarChar(64)
+  // --- Kênh mobile GPS ---
+  latitude          Decimal?         @db.Decimal(10, 7)
+  longitude         Decimal?         @db.Decimal(10, 7)
+  accuracyM         Int?             @map("accuracy_m")
+  bssid             String?          @db.VarChar(32)
+  ssid              String?          @db.VarChar(64)
+  // --- Kênh FaceID + liveness ---
+  isFaceVerified    Boolean          @default(false) @map("is_face_verified")
+  similarity        Decimal?         @db.Decimal(5, 4)
+  livenessScore     Decimal?         @map("liveness_score") @db.Decimal(5, 4)
+  livenessDetail    Json?            @map("liveness_detail")
+  moirePeakRatio    Decimal?         @map("moire_peak_ratio") @db.Decimal(8, 5)
+  // --- Kiểm soát geofence ---
+  geofenceOk        Boolean?         @map("geofence_ok")
+  distanceM         Int?             @map("distance_m")
+  isManual          Boolean          @default(false) @map("is_manual")
+  isVoid            Boolean          @default(false) @map("is_void")
+  voidReason        String?          @map("void_reason") @db.VarChar(255)
+  dailyAttendanceId String?          @map("daily_attendance_id") @db.Uuid
+  dailyAttendance   DailyAttendance? @relation(fields: [dailyAttendanceId], references: [id])
+  createdAt         DateTime         @default(now()) @map("created_at")
+
+  @@index([employeeId, punchAt])
+  @@index([punchAt])
+  @@index([deviceUserId, punchAt])
+  @@index([dailyAttendanceId])
+  @@map("raw_punches")
+}
+
+model DailyAttendance {
+  id               String           @id @default(uuid()) @db.Uuid
+  employeeId       String           @map("employee_id") @db.Uuid
+  employee         Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  workDate         DateTime         @map("work_date") @db.Date
+  shiftId          String?          @map("shift_id") @db.Uuid
+  shift            ShiftDefinition? @relation(fields: [shiftId], references: [id])
+  status           AttendanceStatus @default(PRESENT)
+  /// Giờ vào/ra thực tế đã ghép cặp
+  checkInAt        DateTime?        @map("check_in_at")
+  checkOutAt       DateTime?        @map("check_out_at")
+  /// JSON: chi tiết từng đoạn của ca (ca gãy có 2 phần tử)
+  segments         Json?
+  plannedHours     Decimal          @default(0) @map("planned_hours") @db.Decimal(5, 2)
+  workedHours      Decimal          @default(0) @map("worked_hours") @db.Decimal(5, 2)
+  /// Số giờ được QUY THÀNH công chuẩn (sau khi áp hệ số bù/thiếu)
+  standardDays     Decimal          @default(0) @map("standard_days") @db.Decimal(6, 3)
+  lateMinutes      Int              @default(0) @map("late_minutes")
+  earlyLeaveMin    Int              @default(0) @map("early_leave_minutes")
+  absentMinutes    Int              @default(0) @map("absent_minutes")
+  /// Giờ trong khung 22:00-06:00 của ca chính => phụ cấp 30%
+  nightHours       Decimal          @default(0) @map("night_hours") @db.Decimal(5, 2)
+  otWeekdayHours   Decimal          @default(0) @map("ot_weekday_hours") @db.Decimal(5, 2)
+  otWeekendHours   Decimal          @default(0) @map("ot_weekend_hours") @db.Decimal(5, 2)
+  otHolidayHours   Decimal          @default(0) @map("ot_holiday_hours") @db.Decimal(5, 2)
+  /// OT ban đêm (hệ số 150/200/300 + 30% + 20%)
+  otNightHours     Decimal          @default(0) @map("ot_night_hours") @db.Decimal(5, 2)
+  /// Số giờ được bù từ đơn giải trình / công tác đã duyệt
+  regularizedHours Decimal          @default(0) @map("regularized_hours") @db.Decimal(5, 2)
+  regularizationId String?          @map("regularization_id") @db.Uuid
+  regularization   LeaveRequest?    @relation("RegularizationAttendance", fields: [regularizationId], references: [id])
+  punches          RawPunch[]
+  /// Nguồn dữ liệu cuối cùng tác động
+  lastComputedAt   DateTime?        @map("last_computed_at")
+  isLocked         Boolean          @default(false) @map("is_locked")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+  deletedAt        DateTime?        @map("deleted_at")
+
+  @@unique([employeeId, workDate])
+  @@index([workDate])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("daily_attendances")
+}
+
+// ============================================================================
+// LUỒNG PHÊ DUYỆT (STATE MACHINE + MA TRẬN NGƯỜI DUYỆT)
+// ============================================================================
+
+model WorkflowDefinition {
+  id           String         @id @default(uuid()) @db.Uuid
+  code         String         @unique @db.VarChar(32)
+  name         String         @db.VarChar(160)
+  /// Loại đơn áp dụng
+  requestTypes RequestType[]  @map("request_types")
+  priority     Int            @default(100) // số nhỏ = ưu tiên cao hơn
+  isActive     Boolean        @default(true) @map("is_active")
+  /// JSON: các bước duyệt + điều kiện kích hoạt
+  /// [{ step:1, approverType:"DIRECT_MANAGER" },
+  ///  { step:2, approverType:"DEPARTMENT_HEAD", when:{ field:"days", op:">=", value:2 } },
+  ///  { step:3, approverType:"ROLE", role:"CEO", when:{ field:"days", op:">=", value:3 } }]
+  steps        Json
+  validFrom    DateTime       @default(now()) @map("valid_from")
+  validTo      DateTime?      @map("valid_to")
+  requests     LeaveRequest[]
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+  createdBy    String?        @map("created_by")
+  deletedAt    DateTime?      @map("deleted_at")
+
+  @@index([deletedAt])
+  @@map("workflow_definitions")
+}
+
+model LeaveRequest {
+  id                 String              @id @default(uuid()) @db.Uuid
+  requestNo          String              @unique @map("request_no") @db.VarChar(32)
+  employeeId         String              @map("employee_id") @db.Uuid
+  employee           Employee            @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  type               RequestType
+  status             RequestStatus       @default(DRAFT)
+  title              String              @db.VarChar(160)
+  reason             String?             @db.Text
+  fromDate           DateTime            @map("from_date")
+  toDate             DateTime            @map("to_date")
+  fromTimeMin        Int                 @default(480) @map("from_time_min")
+  toTimeMin          Int                 @default(1020) @map("to_time_min")
+  days               Decimal             @db.Decimal(6, 2)
+  hours              Decimal             @db.Decimal(6, 2)
+  isPaid             Boolean             @default(true) @map("is_paid")
+  /// Ảnh hưởng tới loại ngày công (OT / bù công / trừ phép)
+  /// Đơn giải trình: ngày + giờ vào/ra đề xuất
+  regularizationDate DateTime?           @map("regularization_date") @db.Date
+  proposedCheckIn    DateTime?           @map("proposed_check_in")
+  proposedCheckOut   DateTime?           @map("proposed_check_out")
+  attachments        Json?
+  workflowId         String?             @map("workflow_id") @db.Uuid
+  workflow           WorkflowDefinition? @relation(fields: [workflowId], references: [id])
+  currentStep        Int                 @default(0) @map("current_step")
+  totalSteps         Int                 @default(0) @map("total_steps")
+  submittedAt        DateTime?           @map("submitted_at")
+  decidedAt          DateTime?           @map("decided_at")
+  approvedBy         String?             @map("approved_by")
+  steps              ApprovalStep[]
+  dailyAttendances   DailyAttendance[]   @relation("RegularizationAttendance")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+  createdBy          String?             @map("created_by")
+  deletedAt          DateTime?           @map("deleted_at")
+
+  @@index([employeeId, fromDate, toDate])
+  @@index([status])
+  @@index([type, status])
+  @@index([deletedAt])
+  @@map("leave_requests")
+}
+
+model ApprovalStep {
+  id           String          @id @default(uuid()) @db.Uuid
+  requestId    String          @map("request_id") @db.Uuid
+  request      LeaveRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  step         Int
+  /// Loại người duyệt: DIRECT_MANAGER | DEPARTMENT_HEAD | HR_HEAD | CEO | ROLE | USER
+  approverType String          @map("approver_type") @db.VarChar(32)
+  approverRole UserRole?       @map("approver_role")
+  approverId   String?         @map("approver_id") @db.Uuid
+  approver     User?           @relation(fields: [approverId], references: [id])
+  approverName String?         @map("approver_name") @db.VarChar(160)
+  status       RequestStatus   @default(PENDING_APPROVAL)
+  action       ApprovalAction?
+  comment      String?         @db.VarChar(1000)
+  ipAddress    String?         @map("ip_address") @db.VarChar(64)
+  userAgent    String?         @map("user_agent") @db.VarChar(255)
+  actedAt      DateTime?       @map("acted_at")
+  dueAt        DateTime?       @map("due_at")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  @@unique([requestId, step])
+  @@index([approverId, status])
+  @@map("approval_steps")
+}
+
+/// Nhật ký vết bất biến — append-only, không UPDATE/DELETE
+model ApprovalAuditTrail {
+  id         String         @id @default(uuid()) @db.Uuid
+  requestId  String         @map("request_id") @db.Uuid
+  actorId    String?        @map("actor_id") @db.Uuid
+  actorName  String?        @map("actor_name") @db.VarChar(160)
+  actorRole  UserRole?      @map("actor_role")
+  action     ApprovalAction
+  fromStatus RequestStatus? @map("from_status")
+  toStatus   RequestStatus? @map("to_status")
+  step       Int?
+  comment    String?        @db.VarChar(1000)
+  ipAddress  String         @map("ip_address") @db.VarChar(64)
+  userAgent  String?        @map("user_agent") @db.VarChar(255)
+  metadata   Json?
+  createdAt  DateTime       @default(now()) @map("created_at")
+
+  @@index([requestId, createdAt])
+  @@index([actorId])
+  @@map("approval_audit_trails")
+}
+
+// ============================================================================
+// LƯƠNG
+// ============================================================================
+
+/// Thành phần lương động — Dynamic Formula Builder
+model SalaryComponent {
+  id           String            @id @default(uuid()) @db.Uuid
+  code         String            @unique @db.VarChar(32) // BASE, KPI, MEAL, OT, PENALTY_LATE...
+  name         String            @db.VarChar(160)
+  type         ComponentType
+  calcMode     ComponentCalcMode @map("calc_mode")
+  /// Biến số tham chiếu (vd: "baseSalary", "workedDays", "kpiScore")
+  variable     String?           @db.VarChar(64)
+  /// Giá trị cố định hoặc hệ số
+  amount       Int               @default(0)
+  rate         Decimal?          @db.Decimal(6, 4)
+  /// Biểu thức động, vd: "round(baseSalary * kpiScore / 100)"
+  formula      String?           @db.Text
+  /// Có tính đóng BHXH/BHYT/BHTN không
+  isTaxable    Boolean           @default(true) @map("is_taxable")
+  isSiBase     Boolean           @default(false) @map("is_si_base")
+  /// Phụ cấp ăn trưa: phần vượt ngưỡng mới chịu thuế TNCN
+  taxExemptCap Int?              @map("tax_exempt_cap")
+  sortOrder    Int               @default(100) @map("sort_order")
+  isSystem     Boolean           @default(false) @map("is_system")
+  isActive     Boolean           @default(true) @map("is_active")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+  deletedAt    DateTime?         @map("deleted_at")
+
+  @@index([type, sortOrder])
+  @@index([deletedAt])
+  @@map("salary_components")
+}
+
+model PayRun {
+  id              String         @id @default(uuid()) @db.Uuid
+  code            String         @unique @db.VarChar(32)
+  name            String         @db.VarChar(160)
+  periodYear      Int            @map("period_year")
+  periodMonth     Int            @map("period_month")
+  /// Kỳ công từ ngày / đến ngày
+  periodFrom      DateTime       @map("period_from") @db.Date
+  periodTo        DateTime       @map("period_to") @db.Date
+  status          PayRunStatus   @default(DRAFT)
+  /// Chế độ thuế áp dụng — snapshot để tái lập chính xác
+  taxRegimeCode   String         @map("tax_regime_code") @db.VarChar(32)
+  /// Snapshot tham số pháp lý tại thời điểm tính
+  policySnapshot  Json           @map("policy_snapshot")
+  orgUnitId       String?        @map("org_unit_id") @db.Uuid
+  totalGross      Int            @default(0) @map("total_gross")
+  totalNet        Int            @default(0) @map("total_net")
+  totalSiEmployee Int            @default(0) @map("total_si_employee")
+  totalSiEmployer Int            @default(0) @map("total_si_employer")
+  totalPit        Int            @default(0) @map("total_pit")
+  headcount       Int            @default(0)
+  lockedAt        DateTime?      @map("locked_at")
+  lockedBy        String?        @map("locked_by")
+  approvedAt      DateTime?      @map("approved_at")
+  approvedBy      String?        @map("approved_by")
+  paidAt          DateTime?      @map("paid_at")
+  paidBy          String?        @map("paid_by")
+  /// Mốc đã sinh bút toán kế toán — chống ghi sổ trùng một kỳ hai lần
+  glPostedAt      DateTime?      @map("gl_posted_at")
+  paySlips        PaySlip[]
+  journals        JournalEntry[]
+  paymentFiles    PaymentFile[]
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  createdBy       String?        @map("created_by")
+  deletedAt       DateTime?      @map("deleted_at")
+
+  @@unique([periodYear, periodMonth, orgUnitId])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("pay_runs")
+}
+
+model PaySlip {
+  id                     String    @id @default(uuid()) @db.Uuid
+  payRunId               String    @map("pay_run_id") @db.Uuid
+  payRun                 PayRun    @relation(fields: [payRunId], references: [id], onDelete: Cascade)
+  employeeId             String    @map("employee_id") @db.Uuid
+  employee               Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  // --- Công ---
+  workedDays             Decimal   @default(0) @map("worked_days") @db.Decimal(6, 3)
+  standardDays           Decimal   @default(0) @map("standard_days") @db.Decimal(6, 3)
+  nightHours             Decimal   @default(0) @map("night_hours") @db.Decimal(5, 2)
+  otWeekdayHours         Decimal   @default(0) @map("ot_weekday_hours") @db.Decimal(5, 2)
+  otWeekendHours         Decimal   @default(0) @map("ot_weekend_hours") @db.Decimal(5, 2)
+  otHolidayHours         Decimal   @default(0) @map("ot_holiday_hours") @db.Decimal(5, 2)
+  // --- Tiền ---
+  hourlyRate             Int       @default(0) @map("hourly_rate")
+  gross                  Int       @default(0)
+  allowances             Int       @default(0)
+  kpiAmount              Int       @default(0) @map("kpi_amount")
+  commission             Int       @default(0)
+  nightAllowance         Int       @default(0) @map("night_allowance")
+  otAmount               Int       @default(0) @map("ot_amount")
+  deductions             Int       @default(0)
+  siBase                 Int       @default(0) @map("si_base")
+  siEmployee             Int       @default(0) @map("si_employee") // 8% BHXH
+  hiEmployee             Int       @default(0) @map("hi_employee") // 1.5% BHYT
+  uiEmployee             Int       @default(0) @map("ui_employee") // 1% BHTN
+  totalInsuranceEmployee Int       @default(0) @map("total_insurance_employee") // 10.5%
+  siEmployer             Int       @default(0) @map("si_employer") // 17%
+  hiEmployer             Int       @default(0) @map("hi_employer") // 3%
+  uiEmployer             Int       @default(0) @map("ui_employer") // 1%
+  wciEmployer            Int       @default(0) @map("wci_employer") // 0.5% BHTNLĐ-BNN
+  totalInsuranceEmployer Int       @default(0) @map("total_insurance_employer") // 21.5%
+  taxableIncome          Int       @default(0) @map("taxable_income")
+  deductionsDetail       Json?     @map("deductions_detail")
+  earningsDetail         Json?     @map("earnings_detail")
+  selfDeduction          Int       @default(0) @map("self_deduction")
+  dependentCount         Int       @default(0) @map("dependent_count")
+  dependentDeduction     Int       @default(0) @map("dependent_deduction")
+  pit                    Int       @default(0)
+  otherDeductions        Int       @default(0) @map("other_deductions")
+  advance                Int       @default(0)
+  net                    Int       @default(0)
+  payslipSentAt          DateTime? @map("payslip_sent_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+  deletedAt              DateTime? @map("deleted_at")
+
+  @@unique([payRunId, employeeId])
+  @@index([employeeId])
+  @@index([deletedAt])
+  @@map("pay_slips")
+}
+
+// ============================================================================
+// CẦU NỐI KẾ TOÁN (DOUBLE-ENTRY GENERAL LEDGER BRIDGE)
+// ============================================================================
+
+model Account {
+  id         String    @id @default(uuid()) @db.Uuid
+  code       String    @unique @db.VarChar(16)
+  name       String    @db.VarChar(160)
+  /// ASSET | LIABILITY | EQUITY | REVENUE | EXPENSE
+  type       String    @db.VarChar(16)
+  /// DEBIT | CREDIT — số dư bên nào
+  normalSide String    @map("normal_side") @db.VarChar(8)
+  parentId   String?   @map("parent_id") @db.Uuid
+  parent     Account?  @relation("AccountTree", fields: [parentId], references: [id])
+  children   Account[] @relation("AccountTree")
+  isActive   Boolean   @default(true) @map("is_active")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  deletedAt  DateTime? @map("deleted_at")
+
+  @@index([type])
+  @@index([deletedAt])
+  @@map("accounts")
+}
+
+model CostCenter {
+  id        String         @id @default(uuid()) @db.Uuid
+  code      String         @unique @db.VarChar(32)
+  name      String         @db.VarChar(160)
+  type      CostCenterType
+  orgUnitId String?        @unique @map("org_unit_id") @db.Uuid
+  orgUnit   OrgUnit?       @relation(fields: [orgUnitId], references: [id])
+  glAccount String         @default("6422") @map("gl_account") @db.VarChar(16)
+  isActive  Boolean        @default(true) @map("is_active")
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+  deletedAt DateTime?      @map("deleted_at")
+
+  @@index([deletedAt])
+  @@map("cost_centers")
+}
+
+model JournalEntry {
+  id          String        @id @default(uuid()) @db.Uuid
+  entryNo     String        @unique @map("entry_no") @db.VarChar(32)
+  date        DateTime      @db.Date
+  description String        @db.VarChar(512)
+  sourceType  String        @map("source_type") @db.VarChar(32) // PAYROLL | MANUAL | SALES
+  sourceId    String?       @map("source_id") @db.Uuid
+  payRunId    String?       @map("pay_run_id") @db.Uuid
+  payRun      PayRun?       @relation(fields: [payRunId], references: [id])
+  status      JournalStatus @default(DRAFT)
+  lines       JournalLine[]
+  postedAt    DateTime?     @map("posted_at")
+  postedBy    String?       @map("posted_by")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+  deletedAt   DateTime?     @map("deleted_at")
+
+  @@index([date])
+  @@index([sourceType, sourceId])
+  @@index([deletedAt])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  id             String       @id @default(uuid()) @db.Uuid
+  entryId        String       @map("entry_id") @db.Uuid
+  entry          JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  accountCode    String       @map("account_code") @db.VarChar(16)
+  /// TK chi tiết con (vd 33831 = BHXH, 3384 = BHYT, 3386 = BHTN)
+  subAccount     String?      @map("sub_account") @db.VarChar(16)
+  debit          Int          @default(0)
+  credit         Int          @default(0)
+  costCenterCode String?      @map("cost_center_code") @db.VarChar(32)
+  employeeId     String?      @map("employee_id") @db.Uuid
+  memo           String?      @db.VarChar(255)
+  lineNo         Int          @default(0) @map("line_no")
+
+  @@index([entryId, lineNo])
+  @@index([accountCode])
+  @@map("journal_lines")
+}
+
+model PaymentFile {
+  id          String   @id @default(uuid()) @db.Uuid
+  payRunId    String   @map("pay_run_id") @db.Uuid
+  payRun      PayRun   @relation(fields: [payRunId], references: [id], onDelete: Cascade)
+  bankCode    BankCode @map("bank_code")
+  fileName    String   @map("file_name") @db.VarChar(255)
+  fileFormat  String   @map("file_format") @db.VarChar(16) // txt | csv | xlsx
+  checksum    String   @db.VarChar(128)
+  rowCount    Int      @map("row_count")
+  totalAmount Int      @map("total_amount")
+  storagePath String   @map("storage_path") @db.VarChar(512)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([payRunId])
+  @@map("payment_files")
+}
+
+// ============================================================================
+// CẦU NỐI BÁN HÀNG -> LƯƠNG (SALES -> PAYROLL COMMISSION BRIDGE)
+// ============================================================================
+
+model SalesOrder {
+  id                     String         @id @default(uuid()) @db.Uuid
+  orderNo                String         @unique @map("order_no") @db.VarChar(32)
+  employeeId             String?        @map("employee_id") @db.Uuid // NVKD phụ trách
+  customerName           String         @map("customer_name") @db.VarChar(160)
+  status                 OrderStatus
+  orderDate              DateTime       @map("order_date") @db.Date
+  /// Ngày ghi nhận doanh số (thường = ngày thanh toán / bàn giao)
+  revenueDate            DateTime?      @map("revenue_date") @db.Date
+  totalAmount            Int            @map("total_amount")
+  discountAmount         Int            @default(0) @map("discount_amount")
+  taxAmount              Int            @default(0) @map("tax_amount")
+  /// Doanh thu tính hoa hồng (sau chiết khấu, trước/sau thuế tuỳ chính sách)
+  netRevenue             Int            @map("net_revenue")
+  grossMargin            Int?           @map("gross_margin")
+  isCountedForCommission Boolean        @default(false) @map("is_counted_for_commission")
+  commissionRunId        String?        @map("commission_run_id") @db.Uuid
+  commissionRun          CommissionRun? @relation(fields: [commissionRunId], references: [id])
+  createdAt              DateTime       @default(now()) @map("created_at")
+  updatedAt              DateTime       @updatedAt @map("updated_at")
+  deletedAt              DateTime?      @map("deleted_at")
+
+  @@index([employeeId, orderDate])
+  @@index([status, revenueDate])
+  @@index([deletedAt])
+  @@map("sales_orders")
+}
+
+model CommissionPolicy {
+  id               String          @id @default(uuid()) @db.Uuid
+  code             String          @unique @db.VarChar(32)
+  name             String          @db.VarChar(160)
+  /// Tỷ lệ hoa hồng cố định (nếu không dùng bậc)
+  flatRate         Decimal?        @map("flat_rate") @db.Decimal(6, 4)
+  /// JSON bậc luỹ tiến: [{ from:0, to:500000000, rate:0.03 }, ...]
+  tiers            Json?
+  /// Chỉ số KPI tối thiểu để được tính hoa hồng
+  minKpiScore      Int?            @map("min_kpi_score")
+  /// Trần hoa hồng/tháng
+  capAmount        Int?            @map("cap_amount")
+  /// Hệ số điều chỉnh theo tỷ lệ thu hồi công nợ
+  collectionFactor Json?           @map("collection_factor")
+  /// Tính trên doanh thu (REVENUE) hay lợi nhuận gộp (MARGIN)
+  baseOn           String          @default("REVENUE") @map("base_on") @db.VarChar(16)
+  isActive         Boolean         @default(true) @map("is_active")
+  validFrom        DateTime        @default(now()) @map("valid_from")
+  validTo          DateTime?       @map("valid_to")
+  runs             CommissionRun[]
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+  deletedAt        DateTime?       @map("deleted_at")
+
+  @@index([deletedAt])
+  @@map("commission_policies")
+}
+
+model CommissionRun {
+  id              String           @id @default(uuid()) @db.Uuid
+  policyId        String           @map("policy_id") @db.Uuid
+  policy          CommissionPolicy @relation(fields: [policyId], references: [id])
+  periodYear      Int              @map("period_year")
+  periodMonth     Int              @map("period_month")
+  status          String           @default("DRAFT") @db.VarChar(16)
+  results         Json? // [{ employeeId, revenue, commission }]
+  totalCommission Int              @default(0) @map("total_commission")
+  orders          SalesOrder[]
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+  deletedAt       DateTime?        @map("deleted_at")
+
+  @@unique([policyId, periodYear, periodMonth])
+  @@index([deletedAt])
+  @@map("commission_runs")
+}
+
+// ============================================================================
+// VẬN HÀNH
+// ============================================================================
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  actorId   String?  @map("actor_id") @db.Uuid
+  actor     User?    @relation(fields: [actorId], references: [id])
+  action    String   @db.VarChar(64)
+  entity    String   @db.VarChar(64)
+  entityId  String?  @map("entity_id") @db.VarChar(64)
+  before    Json?
+  after     Json?
+  ipAddress String   @map("ip_address") @db.VarChar(64)
+  userAgent String?  @map("user_agent") @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([entity, entityId])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
+
+model QueueJob {
+  id          String    @id @default(uuid()) @db.Uuid
+  queue       QueueName
+  name        String    @db.VarChar(128)
+  payload     Json
+  status      JobStatus @default(PENDING)
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5) @map("max_attempts")
+  lastError   String?   @map("last_error") @db.Text
+  runAt       DateTime  @default(now()) @map("run_at")
+  startedAt   DateTime? @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  result      Json?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([queue, status, runAt])
+  @@map("queue_jobs")
+}
+
+model SystemSetting {
+  id        String   @id @default(uuid()) @db.Uuid
+  key       String   @unique @db.VarChar(128)
+  value     Json
+  category  String   @default("general") @db.VarChar(64)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("system_settings")
+}
