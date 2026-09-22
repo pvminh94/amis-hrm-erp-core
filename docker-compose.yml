@@ -106,7 +106,19 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-amis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-amis_hrm}?schema=public&connection_limit=20
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      # BAT BUOC phai override ca cai nay. schema.prisma khai bao
+      #   directUrl = env("DIRECT_DATABASE_URL")
+      # va `prisma migrate deploy` dung directUrl CHU KHONG dung url.
+      # env_file .env mang gia tri localhost:5432, ma trong container thi
+      # localhost la chinh no => "P1001: Can't reach database server".
+      # directUrl khong can connection_limit (ket noi truc tiep, khong qua pooler).
+      DIRECT_DATABASE_URL: postgresql://${POSTGRES_USER:-amis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-amis_hrm}?schema=public
+      # queue.ts doc REDIS_HOST/REDIS_PORT/REDIS_PASSWORD/REDIS_DB — KHONG doc
+      # REDIS_URL. .env mang REDIS_HOST=localhost nen bat buoc phai override
+      # sang ten service "redis", neu khong worker se noi vao chinh no.
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
     ports:
       - "${APP_PORT:-3000}:3000"
     volumes:
@@ -147,7 +159,10 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-amis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-amis_hrm}?schema=public&connection_limit=10
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      DIRECT_DATABASE_URL: postgresql://${POSTGRES_USER:-amis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-amis_hrm}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
     volumes:
       - storage:/var/amis
     networks: [amis-net]

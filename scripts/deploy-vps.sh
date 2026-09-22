@@ -221,10 +221,27 @@ done
 
 # Container app tự chạy `prisma migrate deploy` khi start. Kiểm tra kết quả.
 log "Cho app khoi dong..."
+# Phat hien restart-loop som. Nguyen nhan thuong gap: bien moi truong trong
+# .env tro ve localhost (vd DIRECT_DATABASE_URL, REDIS_HOST) ma compose khong
+# override — trong container thi localhost la chinh no nen ket noi that bai.
+state_of() { docker inspect --format '{{.State.Status}} {{.RestartCount}}' "$(cid "$1")" 2>/dev/null || echo "missing 0"; }
+
 for i in $(seq 1 30); do
   if curl -fsS "http://127.0.0.1:${APP_PORT}/health" >/dev/null 2>&1; then
     ok "API san sang: http://127.0.0.1:${APP_PORT}/health"
     break
+  fi
+
+  app_state="$(state_of app)"
+  restarts="${app_state##* }"
+  if [ "${app_state%% *}" = "restarting" ] && [ "$restarts" -ge 3 ]; then
+    warn "Container 'app' dang restart loop ($restarts lan). Log:"
+    $COMPOSE logs --tail=40 app
+    echo ""
+    warn "Nguyen nhan thuong gap: bien trong .env tro ve 'localhost' ma"
+    warn "compose khong override. Kiem tra bang:"
+    echo "    docker compose exec -T app env | grep -E 'DATABASE|REDIS'"
+    die "App khong khoi dong duoc."
   fi
   if [ "$i" -eq 30 ]; then
     $COMPOSE logs --tail=50 app
