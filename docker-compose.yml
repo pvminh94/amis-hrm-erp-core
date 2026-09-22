@@ -25,8 +25,15 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Bắt buộc đặt POSTGRES_PASSWORD trong .env}
       # Ép UTF-8 — dữ liệu tiếng Việt
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+    # KHÔNG expose ra host. App và worker nối qua mạng nội bộ Docker
+    # (postgres:5432) nên không cần cổng host. Hai lý do:
+    #   1. VPS đang chạy dịch vụ khác (ERPNext, GitLab...) rất dễ đụng 5432
+    #   2. Mở Postgres ra interface mạng là rủi ro bảo mật không cần thiết
+    # Cần kết nối từ DB client thì tạo docker-compose.override.yml:
+    #   services:
+    #     postgres:
+    #       ports: ["127.0.0.1:5432:5432"]
+    # rồi vào DB bằng SSH tunnel:  ssh -L 5432:127.0.0.1:5432 user@vps
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -58,8 +65,9 @@ services:
       --maxmemory 512mb
       --maxmemory-policy noeviction
       --requirepass ${REDIS_PASSWORD:?Bắt buộc đặt REDIS_PASSWORD trong .env}
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    # KHÔNG expose ra host — xem giải thích ở service postgres.
+    # QUAN TRỌNG: ERPNext/Frappe cũng dùng Redis ở 6379, nên expose cổng này
+    # sẽ đụng ngay trên VPS đang chạy ERPNext.
     volumes:
       - redisdata:/data
     healthcheck:

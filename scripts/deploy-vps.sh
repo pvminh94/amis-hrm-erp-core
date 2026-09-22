@@ -160,6 +160,36 @@ else
 fi
 
 # ==============================================================================
+# 4b. KIỂM TRA ĐỤNG CỔNG
+# ==============================================================================
+# VPS thường đang chạy dịch vụ khác (ERPNext dùng 80/443/3306/6379/8000/9000).
+# Postgres và Redis của dự án này KHÔNG expose ra host nữa, nên chỉ cần lo
+# cho cổng của app.
+port_busy() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${1}\$"
+  else
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${1}\$"
+  fi
+}
+
+if port_busy "$APP_PORT"; then
+  FREE=""
+  for cand in 3001 3002 3010 8080 8090; do
+    if ! port_busy "$cand"; then FREE="$cand"; break; fi
+  done
+  if [ -z "$FREE" ]; then
+    die "Cong $APP_PORT dang bi chiem va khong tim duoc cong thay the. Dat APP_PORT thu cong."
+  fi
+  warn "Cong $APP_PORT dang bi dich vu khac chiem (co the la ERPNext)."
+  sed -i "s|^APP_PORT=.*|APP_PORT=${FREE}|" .env 2>/dev/null || echo "APP_PORT=${FREE}" >> .env
+  APP_PORT="$FREE"
+  warn "Da doi sang cong $APP_PORT."
+else
+  ok "Cong $APP_PORT con trong"
+fi
+
+# ==============================================================================
 # 5. BUILD & START
 # ==============================================================================
 log "Build image va khoi dong (lan dau mat 3-6 phut)..."
