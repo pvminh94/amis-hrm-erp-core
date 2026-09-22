@@ -4,7 +4,7 @@
  * ============================================================================
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 
 import type { DataScope, UserRole } from '@prisma/client';
@@ -66,10 +66,24 @@ export function verifyRefreshToken(token: string, secret: string): RefreshTokenP
   return decoded;
 }
 
+/**
+ * SHA-256 một chuỗi (dùng để lưu refresh token dạng hash, không lưu plaintext).
+ *
+ * LƯU Ý — LỖI ĐÃ TỪNG XẢY RA Ở ĐÂY: hàm này từng gọi `require('node:crypto')`
+ * "cho tiện khỏi import". Dự án chạy `"type": "module"` + `module: ESNext`,
+ * tức output là ESM — mà ESM KHÔNG có `require`. Kết quả:
+ *   ReferenceError: require is not defined
+ * và nó nổ đúng lúc login (signRefreshToken -> hashToken), khiến API trả 500
+ * trong khi app vẫn khởi động, migrate, seed và /health bình thường.
+ *
+ * Ba lý do lỗi này lọt lưới:
+ *   1. tsc KHÔNG báo — @types/node khai báo `require` toàn cục, và
+ *      moduleResolution: bundler không kiểm tra ranh giới ESM/CJS.
+ *   2. Unit test chạy qua Vitest/Vite, môi trường có sẵn shim `require`.
+ *   3. smoke.mjs test bcrypt + AES nhưng chưa từng chạm tới hashToken.
+ * => Bài học: import tĩnh ở đầu file. Đừng dùng require() trong project ESM.
+ */
 export function hashToken(token: string): string {
-  // Import đồng bộ để tránh async ở tầng util
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { createHash } = require('node:crypto') as typeof import('node:crypto');
   return createHash('sha256').update(token).digest('hex');
 }
 

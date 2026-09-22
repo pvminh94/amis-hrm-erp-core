@@ -71,6 +71,56 @@ await check('AES-GCM phát hiện bản mã bị sửa (tamper detection)', asyn
 });
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 1b. AUTH UTILS — CHẠY TRÊN dist ESM
+//
+// LÝ DO KHỐI NÀY TỒN TẠI: `hashToken()` từng gọi `require('node:crypto')` bên
+// trong một project `"type": "module"`. ESM không có `require` => ReferenceError.
+// Nó chỉ nổ lúc LOGIN (signRefreshToken -> hashToken), nên app vẫn boot,
+// migrate, seed và /health ngon lành — còn người dùng thật thì nhận 500.
+// tsc không báo (moduleResolution: bundler không chặn ranh giới ESM/CJS) và
+// Vitest có shim `require`, nên chỉ có smoke test chạy node thuần mới bắt được.
+// ---------------------------------------------------------------------------
+console.log('\n\u001b[1m1b. Auth utils (JWT + hashToken) trên dist ESM\u001b[0m');
+const auth = await import(`${DIST}src/common/utils/auth.js`);
+
+await check('hashToken (SHA-256) chạy được trên ESM — không dùng require()', () => {
+  const h = auth.hashToken('refresh-token-mau');
+  if (typeof h !== 'string' || h.length !== 64) throw new Error(`hash sai độ dài: ${h && h.length}`);
+  if (auth.hashToken('refresh-token-mau') !== h) throw new Error('hashToken không tất định');
+  if (auth.hashToken('khac') === h) throw new Error('hashToken đụng độ');
+});
+
+await check('signRefreshToken trả về { token, tokenHash }', () => {
+  const r = auth.signRefreshToken('user-1', 'family-1', 'x'.repeat(48), 3600);
+  if (!r.token || !r.tokenHash) throw new Error('thiếu token hoặc tokenHash');
+  if (r.tokenHash.length !== 64) throw new Error('tokenHash không phải sha256 hex');
+  if (r.token.includes(r.tokenHash)) throw new Error('token không được chứa hash');
+});
+
+await check('signAccessToken → verifyAccessToken khứ hồi đúng payload', () => {
+  const secret = 'y'.repeat(48);
+  const t = auth.signAccessToken(
+    { sub: 'u1', username: 'admin', role: 'SUPER_ADMIN', dataScope: 'COMPANY', scopeRefs: [], employeeId: 'e1' },
+    secret,
+    900,
+  );
+  const p = auth.verifyAccessToken(t, secret);
+  if (p.sub !== 'u1' || p.username !== 'admin') throw new Error('payload sai');
+  if (p.typ !== 'access') throw new Error('typ không phải access');
+});
+
+await check('verifyAccessToken TỪ CHỐI refresh token (chống dùng nhầm loại)', () => {
+  const secret = 'z'.repeat(48);
+  const rt = auth.signRefreshToken('u1', 'f1', secret, 3600).token;
+  try {
+    auth.verifyAccessToken(rt, secret);
+    throw new Error('__KHONG_NEM_LOI__');
+  } catch (e) {
+    if (e.message === '__KHONG_NEM_LOI__') throw new Error('nhận refresh token làm access token!');
+  }
+});
+
 console.log('\n\u001b[1m2. Engine lương (domain thuần)\u001b[0m');
 const { calculatePayroll } = await import(`${DIST}src/domain/payroll.js`);
 
