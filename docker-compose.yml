@@ -70,8 +70,15 @@ services:
     # sẽ đụng ngay trên VPS đang chạy ERPNext.
     volumes:
       - redisdata:/data
+    # Healthcheck chay BEN TRONG container va can doc duoc mat khau.
+    # Truoc day thieu khoi environment nay nen $$REDIS_PASSWORD rong,
+    # redis-cli gui password rong -> Redis tra "NOAUTH Authentication required"
+    # -> grep -q PONG that bai -> container bi danh dau unhealthy -> app va
+    # worker tu choi start ("dependency failed to start").
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Bắt buộc đặt REDIS_PASSWORD trong .env}
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep -q PONG"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 10
